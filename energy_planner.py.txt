@@ -1,0 +1,163 @@
+"""
+Aerodynamic Drag & Energy-Optimal Path Planner for UAV Long-Range Missions
+Developer: Ayoub Lahmar (@Redayoub-lang)
+Domain: Flight Dynamics, Aerodynamics & Admissible Graph Search
+"""
+
+import heapq
+import math
+import numpy as np
+
+
+class AerodynamicEnergyPlanner:
+
+  def __init__(
+      self,
+      grid_size: tuple[int, int] = (20, 20),
+      mass_kg: float = 2.0,
+      wind_vector: np.ndarray = np.array([4.0, 0.0]),
+  ):
+    """
+    :param grid_size: Grid map dimensions (X, Y).
+    :param mass_kg: UAV mass in kg.
+    :param wind_vector: Environmental wind vector [Wx, Wy] in m/s (ENU).
+    """
+    self.grid_size = grid_size
+    self.mass = mass_kg
+    self.g = 9.81
+    self.wind = wind_vector
+
+    # Aerodynamic Model Parameters
+    self.cd = 0.35  # Parasitic Drag Coefficient
+    self.frontal_area = 0.08  # Frontal Drag Area (m^2)
+    self.rotor_disk_area = 0.35  # Total Rotor Disk Swept Area (m^2)
+    self.air_density = 1.225  # Standard Air Density (kg/m^3)
+    self.v_air_nominal = 12.0  # Nominal Airspeed (m/s)
+
+  def calculate_power_watts(self, air_velocity_vec: np.ndarray) -> float:
+    """Computes total power required: P_total = P_hover + P_parasitic_drag."""
+    v_air_mag = float(np.linalg.norm(air_velocity_vec))
+
+    # Hover/Induced Power from Momentum Theory
+    p_hover = math.sqrt(
+        (self.mass * self.g) ** 3
+        / (2.0 * self.air_density * self.rotor_disk_area)
+    )
+
+    # Parasitic Aerodynamic Drag Power (0.5 * rho * Cd * A_f * v^3)
+    p_drag = (
+        0.5
+        * self.air_density
+        * self.cd
+        * self.frontal_area
+        * (v_air_mag**3)
+    )
+
+    return p_hover + p_drag
+
+  def compute_edge_energy_cost(
+      self, node_a: tuple[int, int], node_b: tuple[int, int]
+  ) -> float:
+    """Calculates Energy (Joules) required to transition between two grid points."""
+    dx = node_b[0] - node_a[0]
+    dy = node_b[1] - node_a[1]
+    dist = math.hypot(dx, dy)
+
+    if dist == 0:
+      return 0.0
+
+    u_ground = np.array([dx / dist, dy / dist])
+    v_air_vec = u_ground * self.v_air_nominal
+    v_ground_vec = v_air_vec + self.wind
+    v_ground_mag = float(np.linalg.norm(v_ground_vec))
+
+    if v_ground_mag <= 0.5:
+      return float("inf")  # Impassable headwind condition
+
+    time_sec = dist / v_ground_mag
+    power_watts = self.calculate_power_watts(v_air_vec)
+
+    return power_watts * time_sec
+
+  def plan_optimal_path(
+      self, start: tuple[int, int], goal: tuple[int, int]
+  ) -> tuple[list[tuple[int, int]], float] | None:
+    """Executes A* Search with Admissible Aerodynamic Energy Heuristics."""
+    open_set = []
+    heapq.heappush(open_set, (0.0, start))
+
+    came_from = {}
+    g_score = {start: 0.0}
+
+    # Admissible Heuristic lower bound calculation (Joules per meter)
+    max_ground_speed = self.v_air_nominal + float(np.linalg.norm(self.wind))
+    min_power = self.calculate_power_watts(
+        np.array([self.v_air_nominal, 0.0])
+    )
+    min_joules_per_meter = min_power / max_ground_speed
+
+    neighbors_offset = [
+        (0, 1),
+        (1, 0),
+        (0, -1),
+        (-1, 0),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+    ]
+
+    while open_set:
+      _, current = heapq.heappop(open_set)
+
+      if current == goal:
+        path = [current]
+        while current in came_from:
+          current = came_from[current]
+          path.append(current)
+        path.reverse()
+        return path, g_score[goal]
+
+      for dx, dy in neighbors_offset:
+        neighbor = (current[0] + dx, current[1] + dy)
+
+        if (
+            0 <= neighbor[0] < self.grid_size[0]
+            and 0 <= neighbor[1] < self.grid_size[1]
+        ):
+          edge_energy = self.compute_edge_energy_cost(current, neighbor)
+          if edge_energy == float("inf"):
+            continue
+
+          tentative_g = g_score[current] + edge_energy
+
+          if neighbor not in g_score or tentative_g < g_score[neighbor]:
+            came_from[neighbor] = current
+            g_score[neighbor] = tentative_g
+
+            # Strictly Admissible Euclidean Energy Heuristic
+            h_dist = math.hypot(goal[0] - neighbor[0], goal[1] - neighbor[1])
+            h_cost = h_dist * min_joules_per_meter
+
+            heapq.heappush(open_set, (tentative_g + h_cost, neighbor))
+
+    return None
+
+
+if __name__ == "__main__":
+  planner = AerodynamicEnergyPlanner(
+      grid_size=(20, 20), wind_vector=np.array([5.0, 0.0])
+  )
+
+  start_node, goal_node = (2, 2), (18, 18)
+  print("[SYSTEM INIT] Running Admissible Aerodynamic Path Planner...")
+
+  result = planner.plan_optimal_path(start_node, goal_node)
+
+  if result:
+    path, energy_joules = result
+    print(f"[PATH FOUND] Total Waypoints: {len(path)}")
+    print(
+        f"[ENERGY CONSUMPTION] {energy_joules:.2f} Joules"
+        f" ({energy_joules / 3600.0:.3f} Wh)"
+    )
